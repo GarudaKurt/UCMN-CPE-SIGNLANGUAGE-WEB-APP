@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+
+<title>Voice to Text Monitor</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+</head>
+
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+
+<div class="bg-white shadow-xl rounded-2xl p-8 w-full max-w-2xl">
+
+    <h1 class="text-2xl font-bold text-center mb-6">
+        🎤 Voice to Text Display
+    </h1>
+
+    <textarea
+        id="voiceText"
+        class="w-full h-48 p-4 border rounded-xl resize-none text-lg"
+        placeholder="Waiting for speech..."
+        readonly
+    ></textarea>
+
+    <p class="text-center text-sm text-gray-500 mt-4">
+        Listening for voice input...
+    </p>
+
+</div>
+
+<script>
+
+async function fetchText() {
+
+    try {
+
+        const response =
+            await fetch("/get_text");
+
+        const data =
+            await response.json();
+
+        document.getElementById(
+            "voiceText"
+        ).value = data.text;
+
+    } catch (error) {
+
+        console.log("Fetch error");
+
+    }
+
+}
+
+// Update every second
+setInterval(fetchText, 1000);
+
+</script>
+
+</body>
+</html>
