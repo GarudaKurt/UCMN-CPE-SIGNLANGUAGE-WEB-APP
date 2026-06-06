@@ -16,17 +16,38 @@ def set_speech_callback(func):
 
 
 # ─────────────────────────────
-# Text-to-Speech (Windows PowerShell)
+# Text-to-Speech (Windows PowerShell) — Filipino voice
 # ─────────────────────────────
 def speak_text(text):
     safe_text = text.replace('"', "'")
+
+    # Try to use a Filipino/Tagalog voice first.
+    # Falls back to default system voice if none is installed.
+    ps_script = f'''
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+
+# Try to find a Filipino or Tagalog voice
+$voices = $synth.GetInstalledVoices() | ForEach-Object {{ $_.VoiceInfo }}
+$filVoice = $voices | Where-Object {{
+    $_.Name -match "Filipino" -or
+    $_.Name -match "Tagalog" -or
+    $_.Culture -match "fil" -or
+    $_.Culture -match "tl"
+}} | Select-Object -First 1
+
+if ($filVoice) {{
+    $synth.SelectVoice($filVoice.Name)
+    Write-Host "[TTS] Using voice: $($filVoice.Name)"
+}} else {{
+    Write-Host "[TTS] No Filipino voice found, using default voice."
+}}
+
+$synth.Speak("{safe_text}")
+'''
+
     subprocess.run(
-        [
-            "powershell", "-Command",
-            f'Add-Type -AssemblyName System.Speech; '
-            f'$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; '
-            f'$s.Speak("{safe_text}")'
-        ],
+        ["powershell", "-Command", ps_script],
         creationflags=subprocess.CREATE_NO_WINDOW
     )
 
@@ -46,11 +67,11 @@ def _tts_worker():
 # ─────────────────────────────
 def _mic_worker():
     recognizer = sr.Recognizer()
-    recognizer.pause_threshold = 1.5        # wait longer before cutting off
-    recognizer.phrase_threshold = 0.3       # min seconds of speech to count
-    recognizer.non_speaking_duration = 0.8  # silence padding around speech
-    recognizer.dynamic_energy_threshold = False  # stop auto-adjusting
-    recognizer.energy_threshold = 400       # stable fixed threshold
+    recognizer.pause_threshold = 1.5
+    recognizer.phrase_threshold = 0.3
+    recognizer.non_speaking_duration = 0.8
+    recognizer.dynamic_energy_threshold = False
+    recognizer.energy_threshold = 400
 
     mic = sr.Microphone()
 
@@ -64,13 +85,13 @@ def _mic_worker():
         try:
             with mic as source:
                 print("🎤 Waiting...")
-                audio = recognizer.listen(source, timeout=None, phrase_time_limit=None)  # no hard cut-off
+                audio = recognizer.listen(source, timeout=None, phrase_time_limit=None)
 
             print("[MIC] Transcribing...")
-            text = recognizer.recognize_google(audio)
+            text = recognizer.recognize_google(audio, language="fil-PH")
             print(f"✅ [MIC] {text}")
 
-            # Speak the transcribed text aloud
+            # Speak the transcribed text aloud in Filipino voice
             tts_queue.put(text)
 
             # Send to web UI

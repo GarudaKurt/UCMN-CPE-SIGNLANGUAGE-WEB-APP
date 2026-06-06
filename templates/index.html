@@ -26,7 +26,6 @@
         overflow: hidden;
         aspect-ratio: 16/9;
       }
-      /* FIX: img replaces canvas — fills wrapper the same way */
       .camera-wrapper img {
         width: 100%;
         height: 100%;
@@ -62,9 +61,37 @@
         100% { background: var(--ink); }
       }
 
-      /* Mode buttons */
+      /* FSL Mode buttons (camera footer) */
       .mode-btn { font-family: 'Space Mono', monospace; font-size: 0.8rem; }
       .mode-btn.active-mode { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+
+      /* Input mode toggle (FSL vs Voice) */
+      .input-toggle-bar {
+        display: flex;
+        background: #e2e1dc;
+        border: 1.5px solid var(--ink);
+        border-radius: 10px;
+        padding: 4px;
+        gap: 4px;
+      }
+      .input-toggle-btn {
+        flex: 1;
+        padding: 8px 12px;
+        border: none;
+        border-radius: 7px;
+        background: transparent;
+        color: #555;
+        font-family: 'Space Mono', monospace;
+        font-size: 0.78rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+      }
+      .input-toggle-btn.active-toggle {
+        background: white;
+        color: var(--ink);
+        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+      }
 
       /* Speech box */
       .output-box {
@@ -120,7 +147,6 @@
             </div>
             <div class="card-body p-0">
                <div class="camera-wrapper">
-                  <!-- FIX: replaced <canvas> with <img> pointing to the MJPEG route -->
                   <img id="cameraFeed" alt="Camera Feed">
                   <div class="camera-overlay" id="cameraStatus">● Live</div>
                </div>
@@ -135,11 +161,23 @@
          </div>
       </div>
 
-      <!-- RIGHT: Detection + Speech -->
+      <!-- RIGHT: Toggle + Detection/Speech panels -->
       <div class="col-lg-5 d-flex flex-column gap-4">
 
-         <!-- FSL Detection result -->
-         <div class="card border-dark shadow-sm">
+         <!-- ── Input Mode Toggle ── -->
+         <div class="input-toggle-bar" role="group" aria-label="Input display mode">
+            <button class="input-toggle-btn active-toggle" id="btnFSLMode"
+                    onclick="switchInputMode('fsl')" aria-pressed="true">
+               🖐️ FSL to Text
+            </button>
+            <button class="input-toggle-btn" id="btnVoiceMode"
+                    onclick="switchInputMode('voice')" aria-pressed="false">
+               🎤 Voice to Text
+            </button>
+         </div>
+
+         <!-- FSL Detection panel -->
+         <div class="card border-dark shadow-sm" id="panelFSL">
             <div class="card-header fw-bold">
                🖐️ Detected Sign
                <span class="text-muted small float-end mono" id="detectionMode">—</span>
@@ -151,8 +189,8 @@
             </div>
          </div>
 
-         <!-- Speech Transcription -->
-         <div class="card border-dark shadow-sm flex-grow-1">
+         <!-- Voice Transcription panel -->
+         <div class="card border-dark shadow-sm flex-grow-1" id="panelVoice" style="display:none;">
             <div class="card-header fw-bold">
                🎤 Speech Transcription
                <span class="text-muted small float-end mono">mic → text → tts</span>
@@ -194,7 +232,19 @@
      body.scrollTop = body.scrollHeight;
    }
 
-   // ── Mode buttons ───────────────────────────────────────────
+   // ── Input mode toggle (FSL vs Voice) ──────────────────────
+   function switchInputMode(mode) {
+     const isFSL = mode === 'fsl';
+     document.getElementById('panelFSL').style.display   = isFSL ? 'block' : 'none';
+     document.getElementById('panelVoice').style.display = isFSL ? 'none'  : 'block';
+     document.getElementById('btnFSLMode').classList.toggle('active-toggle', isFSL);
+     document.getElementById('btnVoiceMode').classList.toggle('active-toggle', !isFSL);
+     document.getElementById('btnFSLMode').setAttribute('aria-pressed', isFSL);
+     document.getElementById('btnVoiceMode').setAttribute('aria-pressed', !isFSL);
+     log(`Display mode switched to: ${isFSL ? 'FSL to Text' : 'Voice to Text'}`);
+   }
+
+   // ── FSL mode buttons (camera footer) ──────────────────────
    const modeButtons = {
      MENU:     document.getElementById("btnMenu"),
      ALPHABET: document.getElementById("btnAlphabet"),
@@ -224,8 +274,8 @@
 
    // ── FSL detection display ──────────────────────────────────
    function showDetection(label, mode) {
-     const box  = document.getElementById("detectionBox");
-     const text = document.getElementById("detectionText");
+     const box   = document.getElementById("detectionBox");
+     const text  = document.getElementById("detectionText");
      const modeEl = document.getElementById("detectionMode");
 
      text.textContent = label;
@@ -260,12 +310,11 @@
        const d = JSON.parse(e.data);
        showDetection(d.label, d.mode);
      });
+
      es.addEventListener("frame", e => {
-         document.getElementById("cameraFeed").src =
-            "data:image/jpeg;base64," + e.data;
-      });
-     // NOTE: "frame" SSE listener removed — camera is now served via
-     // the MJPEG /video_feed route directly into the <img> tag above.
+       document.getElementById("cameraFeed").src =
+         "data:image/jpeg;base64," + e.data;
+     });
 
      es.onerror = () => log("SSE connection lost — retrying…");
    }
