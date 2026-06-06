@@ -1,269 +1,282 @@
 <!DOCTYPE html>
 <html lang="en">
-   <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Sign Language Bridge</title>
-      <!-- Bootstrap 5 -->
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-      <!-- Fonts -->
-      <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;600;700&display=swap" rel="stylesheet">
-      <style>
-         :root {
-         --ink: #0f0f13;
-         --paper: #f5f4ef;
-         --accent: #e84d3d;
-         --ble-blue: #2563eb;
-         --mic-green: #16a34a;
-         --warn: #d97706;
-         }
-         body {
-         font-family: 'Sora', sans-serif;
-         background: var(--paper);
-         color: var(--ink);
-         }
-         /* Topbar */
-         .topbar {
-         background: var(--ink);
-         color: white;
-         border-bottom: 3px solid var(--accent);
-         }
-         .mono {
-         font-family: 'Space Mono', monospace;
-         }
-         /* Gesture display */
-         .gesture-display {
-         min-height: 140px;
-         display: flex;
-         align-items: center;
-         justify-content: center;
-         background: var(--ink);
-         color: white;
-         font-size: 2rem;
-         font-weight: 700;
-         text-align: center;
-         padding: 1.5rem;
-         }
-         .gesture-display.flash {
-         animation: flash 0.6s ease;
-         }
-         @keyframes flash {
-         0% { background: var(--ble-blue); }
-         100% { background: var(--ink); }
-         }
-         /* Output textarea */
-         .output-box {
-         background: var(--paper);
-         border: 2px solid var(--ink);
-         font-family: 'Space Mono', monospace;
-         }
-         /* Activity log */
-         .log-body {
-         height: 160px;
-         overflow-y: auto;
-         background: #0f1117;
-         color: #a3e635;
-         font-family: 'Space Mono', monospace;
-         font-size: 0.8rem;
-         padding: 10px;
-         }
-         .mic-dot {
-         width: 8px;
-         height: 8px;
-         background: var(--mic-green);
-         border-radius: 50%;
-         display: inline-block;
-         margin-right: 6px;
-         animation: pulse 1.5s infinite;
-         }
-         @keyframes pulse {
-         0%,100% { transform: scale(1); }
-         50% { transform: scale(1.4); }
-         }
-      </style>
-   </head>
-   <body>
-      <!-- Top Bar -->
-      <nav class="topbar navbar px-4">
-         <span class="navbar-brand mono fw-bold text-white">
-         🤟 Sign Language Bridge
-         </span>
-         <span id="blePill"
-            class="badge bg-secondary mono"
-            >
-         <span id="bleLabel">
-         BLE Disconnected
-         </span>
-         </span>
-      </nav>
-      <div class="container py-4">
-         <div class="row g-4">
-            <!-- Voice Panel -->
-            <div class="col-lg-6">
-               <div class="card border-dark shadow-sm">
-                  <div class="card-header fw-bold">
-                     🎤 Voice Input
-                     <span class="text-muted small float-end mono">
-                     mic → esp32
-                     </span>
-                  </div>
-                  <div class="card-body">
-                     <textarea
-                        id="voiceText"
-                        class="form-control output-box"
-                        rows="6"
-                        placeholder="Waiting for speech..."
-                        readonly
-                        ></textarea>
-                     <div class="small text-muted mt-2 mono">
-                        <span class="mic-dot"></span>
-                        Microphone active — speaking sends text to ESP32
-                     </div>
-                  </div>
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Sign Language Bridge</title>
+   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;600;700&display=swap" rel="stylesheet">
+   <style>
+      :root {
+        --ink:    #0f0f13;
+        --paper:  #f5f4ef;
+        --accent: #e84d3d;
+        --green:  #16a34a;
+        --blue:   #2563eb;
+      }
+      body { font-family: 'Sora', sans-serif; background: var(--paper); color: var(--ink); }
+      .topbar { background: var(--ink); color: white; border-bottom: 3px solid var(--accent); }
+      .mono   { font-family: 'Space Mono', monospace; }
+
+      /* Camera feed */
+      .camera-wrapper {
+        background: #000;
+        border: 2px solid var(--ink);
+        position: relative;
+        overflow: hidden;
+        aspect-ratio: 16/9;
+      }
+      /* FIX: img replaces canvas — fills wrapper the same way */
+      .camera-wrapper img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .camera-overlay {
+        position: absolute;
+        bottom: 10px; left: 10px;
+        background: rgba(0,0,0,0.6);
+        color: #a3e635;
+        font-family: 'Space Mono', monospace;
+        font-size: 0.75rem;
+        padding: 4px 10px;
+        border-radius: 4px;
+      }
+
+      /* Detection result box */
+      .detection-box {
+        min-height: 100px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--ink);
+        color: white;
+        font-size: 2.5rem;
+        font-weight: 700;
+        letter-spacing: 2px;
+      }
+      .detection-box.flash { animation: flash 0.5s ease; }
+      @keyframes flash {
+        0%   { background: var(--blue); }
+        100% { background: var(--ink); }
+      }
+
+      /* Mode buttons */
+      .mode-btn { font-family: 'Space Mono', monospace; font-size: 0.8rem; }
+      .mode-btn.active-mode { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+
+      /* Speech box */
+      .output-box {
+        background: var(--paper);
+        border: 2px solid var(--ink);
+        font-family: 'Space Mono', monospace;
+        resize: none;
+      }
+
+      /* Log */
+      .log-body {
+        height: 140px;
+        overflow-y: auto;
+        background: #0f1117;
+        color: #a3e635;
+        font-family: 'Space Mono', monospace;
+        font-size: 0.78rem;
+        padding: 10px;
+      }
+
+      /* Mic dot */
+      .mic-dot {
+        width: 8px; height: 8px;
+        background: var(--green);
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+        animation: pulse 1.5s infinite;
+      }
+      @keyframes pulse {
+        0%,100% { transform: scale(1); }
+        50%      { transform: scale(1.5); }
+      }
+   </style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<nav class="topbar navbar px-4">
+   <span class="navbar-brand mono fw-bold text-white">🤟 Sign Language Bridge</span>
+   <span class="mono text-secondary" id="fslModeLabel" style="font-size:0.85rem;">FSL: MENU</span>
+</nav>
+
+<div class="container py-4">
+   <div class="row g-4">
+
+      <!-- LEFT: Camera + Mode Controls -->
+      <div class="col-lg-7">
+         <div class="card border-dark shadow-sm">
+            <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+               <span>📷 FSL Camera</span>
+               <span class="text-muted small mono">live detection</span>
+            </div>
+            <div class="card-body p-0">
+               <div class="camera-wrapper">
+                  <!-- FIX: replaced <canvas> with <img> pointing to the MJPEG route -->
+                  <img id="cameraFeed" alt="Camera Feed">
+                  <div class="camera-overlay" id="cameraStatus">● Live</div>
                </div>
             </div>
-            <!-- Gesture Panel -->
-            <div class="col-lg-6">
-               <div class="card border-dark shadow-sm">
-                  <div class="card-header fw-bold">
-                     🖐️ Gesture Output
-                     <span class="text-muted small float-end mono">
-                     esp32 → tts
-                     </span>
-                  </div>
-                  <div class="card-body">
-                     <div
-                        class="gesture-display mb-3"
-                        id="gestureDisplay"
-                        >
-                        <span id="gestureIdle"
-                           class="text-secondary fs-6">
-                        Waiting for gesture...
-                        </span>
-                        <span id="gestureText"
-                           style="display:none;">
-                        </span>
-                     </div>
-                     <button
-                        class="btn btn-dark w-100 mono fw-bold"
-                        id="speakBtn"
-                        disabled
-                        onclick="speakGesture()"
-                        >
-                     🔊 Speak Again
-                     </button>
-                  </div>
-               </div>
-            </div>
-            <!-- Activity Log -->
-            <div class="col-12">
-               <div class="card border-dark">
-                  <div class="card-header fw-bold">
-                     Activity Log
-                     <span class="text-muted small float-end mono">
-                     real-time
-                     </span>
-                  </div>
-                  <div
-                     class="log-body"
-                     id="logBody"
-                     >
-                     <div>System initialized...</div>
-                  </div>
-               </div>
+            <div class="card-footer d-flex gap-2 flex-wrap">
+               <span class="mono small text-muted me-1 align-self-center">Mode:</span>
+               <button class="btn btn-sm btn-outline-dark mode-btn active-mode" id="btnMenu"     onclick="setMode('MENU')">MENU</button>
+               <button class="btn btn-sm btn-outline-dark mode-btn"             id="btnAlphabet" onclick="setMode('ALPHABET')">ALPHABET</button>
+               <button class="btn btn-sm btn-outline-dark mode-btn"             id="btnNumbers"  onclick="setMode('NUMBERS')">NUMBERS</button>
+               <button class="btn btn-sm btn-outline-dark mode-btn"             id="btnPhrases"  onclick="setMode('PHRASES')">PHRASES</button>
             </div>
          </div>
       </div>
-      <script>
-         let currentGesture = "";
-         
-         function log(msg) {
-           const el = document.createElement("div");
-           el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-           const body = document.getElementById("logBody");
-           body.appendChild(el);
-           body.scrollTop = body.scrollHeight;
-         }
-         
-         function updateBLEStatus(status) {
-           const pill  = document.getElementById("blePill");
-           const label = document.getElementById("bleLabel");
-           const map = { disconnected:"secondary", scanning:"warning", not_found:"danger", connected:"success" };
-           pill.className = "badge bg-" + (map[status] || "secondary") + " mono";
-           label.textContent = status.replace("_", " ");
-           log(`BLE: ${status}`);                          // ← was missing
-         }
-         
-         function showGesture(text) {
-           currentGesture = text;
-           const display = document.getElementById("gestureDisplay");
-           document.getElementById("gestureIdle").style.display = "none";
-           const gest = document.getElementById("gestureText");
-           gest.style.display = "";
-           gest.textContent = text;
-           display.classList.remove("flash");
-           void display.offsetWidth;
-           display.classList.add("flash");
-           document.getElementById("speakBtn").disabled = false;
-           log(`Gesture: "${text}"`);                      // ← was missing
-         }
-         
-         function resetGesture() {
-           currentGesture = "";
-           document.getElementById("gestureIdle").style.display = "";
-           document.getElementById("gestureText").style.display = "none";
-           document.getElementById("speakBtn").disabled = true;
-           log("Gesture reset — ready.");                  // ← was missing
-         }
-         
-         async function speakGesture() {
-           if (!currentGesture) return;
-           const btn = document.getElementById("speakBtn");
-           btn.disabled = true;
-           btn.textContent = "🔊 Speaking…";
-           await fetch("/speak", {
-             method: "POST",
-             headers: { "Content-Type": "application/json" },
-             body: JSON.stringify({ text: currentGesture })
-           });
-           btn.textContent = "🔊 Speak Again";
-           btn.disabled = false;
-         }
-         
-         function startSSE() {
-           const es = new EventSource("/stream");
-         
-           // ← "init" event was entirely missing — fires on first connect
-           es.addEventListener("init", e => {
-             const d = JSON.parse(e.data);
-             document.getElementById("voiceText").value = d.speech;
-             if (d.gesture && !d.gesture.startsWith("Waiting")) showGesture(d.gesture);
-             updateBLEStatus(d.ble_status);
-             log("Connected to backend stream.");
-           });
-         
-           es.addEventListener("speech", e => {
-             const d = JSON.parse(e.data);
-             document.getElementById("voiceText").value = d.text;
-             log(`Voice: "${d.text}"`);                    // ← was missing
-           });
-         
-           es.addEventListener("gesture", e => {
-             const d = JSON.parse(e.data);
-             if (d.reset) resetGesture();
-             else if (d.text) showGesture(d.text);
-           });
-         
-           es.addEventListener("ble_status", e => {
-             updateBLEStatus(JSON.parse(e.data).status);
-             // log() already called inside updateBLEStatus
-           });
-         
-           es.onerror = () => log("Connection lost — retrying…");
-         }
-         
-         startSSE();
-         log("System initialized.");
-      </script>
-   </body>
+
+      <!-- RIGHT: Detection + Speech -->
+      <div class="col-lg-5 d-flex flex-column gap-4">
+
+         <!-- FSL Detection result -->
+         <div class="card border-dark shadow-sm">
+            <div class="card-header fw-bold">
+               🖐️ Detected Sign
+               <span class="text-muted small float-end mono" id="detectionMode">—</span>
+            </div>
+            <div class="card-body p-0">
+               <div class="detection-box" id="detectionBox">
+                  <span id="detectionText" class="text-secondary fs-5">Waiting...</span>
+               </div>
+            </div>
+         </div>
+
+         <!-- Speech Transcription -->
+         <div class="card border-dark shadow-sm flex-grow-1">
+            <div class="card-header fw-bold">
+               🎤 Speech Transcription
+               <span class="text-muted small float-end mono">mic → text → tts</span>
+            </div>
+            <div class="card-body">
+               <textarea id="voiceText" class="form-control output-box" rows="5"
+                  placeholder="Waiting for speech..." readonly></textarea>
+               <div class="small text-muted mt-2 mono">
+                  <span class="mic-dot"></span>Microphone active
+               </div>
+            </div>
+         </div>
+
+      </div>
+
+      <!-- Activity Log -->
+      <div class="col-12">
+         <div class="card border-dark">
+            <div class="card-header fw-bold">
+               Activity Log
+               <span class="text-muted small float-end mono">real-time</span>
+            </div>
+            <div class="log-body" id="logBody">
+               <div>System initialized...</div>
+            </div>
+         </div>
+      </div>
+
+   </div>
+</div>
+
+<script>
+   // ── Logging ────────────────────────────────────────────────
+   function log(msg) {
+     const el = document.createElement("div");
+     el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+     const body = document.getElementById("logBody");
+     body.appendChild(el);
+     body.scrollTop = body.scrollHeight;
+   }
+
+   // ── Mode buttons ───────────────────────────────────────────
+   const modeButtons = {
+     MENU:     document.getElementById("btnMenu"),
+     ALPHABET: document.getElementById("btnAlphabet"),
+     NUMBERS:  document.getElementById("btnNumbers"),
+     PHRASES:  document.getElementById("btnPhrases"),
+   };
+
+   function highlightMode(mode) {
+     Object.entries(modeButtons).forEach(([key, btn]) => {
+       btn.classList.toggle("active-mode", key === mode);
+     });
+     document.getElementById("fslModeLabel").textContent = `FSL: ${mode}`;
+   }
+
+   async function setMode(mode) {
+     const res = await fetch("/set_fsl_mode", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ mode })
+     });
+     const data = await res.json();
+     if (data.ok) {
+       highlightMode(mode);
+       log(`Mode changed to ${mode}`);
+     }
+   }
+
+   // ── FSL detection display ──────────────────────────────────
+   function showDetection(label, mode) {
+     const box  = document.getElementById("detectionBox");
+     const text = document.getElementById("detectionText");
+     const modeEl = document.getElementById("detectionMode");
+
+     text.textContent = label;
+     text.className   = "fw-bold";
+     modeEl.textContent = mode;
+
+     box.classList.remove("flash");
+     void box.offsetWidth;
+     box.classList.add("flash");
+
+     log(`[${mode}] Detected: "${label}"`);
+   }
+
+   // ── SSE ────────────────────────────────────────────────────
+   function startSSE() {
+     const es = new EventSource("/stream");
+
+     es.addEventListener("init", e => {
+       const d = JSON.parse(e.data);
+       document.getElementById("voiceText").value = d.speech;
+       if (d.fsl_label) showDetection(d.fsl_label, d.fsl_mode);
+       log("Connected to backend stream.");
+     });
+
+     es.addEventListener("speech", e => {
+       const d = JSON.parse(e.data);
+       document.getElementById("voiceText").value = d.text;
+       log(`Voice: "${d.text}"`);
+     });
+
+     es.addEventListener("fsl", e => {
+       const d = JSON.parse(e.data);
+       showDetection(d.label, d.mode);
+     });
+     es.addEventListener("frame", e => {
+         document.getElementById("cameraFeed").src =
+            "data:image/jpeg;base64," + e.data;
+      });
+     // NOTE: "frame" SSE listener removed — camera is now served via
+     // the MJPEG /video_feed route directly into the <img> tag above.
+
+     es.onerror = () => log("SSE connection lost — retrying…");
+   }
+
+   // ── Init ───────────────────────────────────────────────────
+   fetch("/get_state").then(r => r.json()).then(d => {
+     highlightMode(d.fsl_mode_current || "MENU");
+   });
+
+   startSSE();
+   log("System initialized.");
+</script>
+</body>
 </html>
