@@ -1,0 +1,11 @@
+Feature size: 3780 (2-hand)
+
+              precision    recall  f1-score   support
+
+Good morning       1.00      1.00      1.00        60
+  Good night       1.00      1.00      1.00        60
+ How are you       1.00      1.00      1.00        60
+
+    accuracy                           1.00       180
+   macro avg       1.00      1.00      1.00       180
+weighted avg       1.00      1.00      1.00       180
