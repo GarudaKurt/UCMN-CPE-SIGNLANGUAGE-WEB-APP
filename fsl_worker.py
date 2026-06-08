@@ -350,7 +350,10 @@ def _detection_loop():
                     last_detected = stable
                     if _detection_callback:
                         _detection_callback({"label": stable, "mode": "NUMBERS"})
-                overlay_text(frame, [f"NUMBERS: {stable}"])
+                overlay_text(frame, [
+                    f"NUMBERS: {stable}",
+                    f"conf: {conf:.0%}" if hand_landmarks else "No hand"
+                ])
 
             elif mode == MODE_PHRASES and clf_phrase:
                 if hand_landmarks:
