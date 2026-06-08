@@ -1,1 +1,1 @@
-py -m pip install flask speechrecognition requests pyaudio
+Execute this command in your terminal: py -m pip install -r requirements.txt
