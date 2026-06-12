@@ -15,6 +15,27 @@ Signs that use one hand (most phrases) will simply have zeros in the
 second-hand slot — the model learns this as "no second hand present".
 Signs that use two hands ("How are you", etc.) get real data in both slots.
 
+DROPOUT TOLERANCE (NEW)
+────────────────────────
+The hand landmarker can briefly lose tracking for 1-2 frames even when
+your hand is clearly in frame (motion blur, awkward angle, etc.). This is
+especially common for fast or sharply-shaped signs like "I love you".
+
+Previously: any frame with 0 hands detected was simply skipped, which
+could stall a recording indefinitely if it kept happening, and a single
+drop-out felt like "no hands detected" even though the sign was performed
+correctly.
+
+Now: if hands briefly disappear mid-sequence, the collector re-uses the
+last known landmark frame for up to MAX_DROPOUT_FRAMES consecutive frames
+so the sequence still completes. If the dropout lasts longer than that
+(meaning the hand truly left the frame), the buffer is cleared and
+recording waits for the hand to reappear.
+
+Also: detection confidence thresholds are lowered slightly so fast,
+sharply-angled signs (like "I love you", which has a distinct splayed
+thumb/index/pinky shape) are tracked more reliably.
+
 Usage:
     python collect_phrases.py
 
@@ -30,12 +51,17 @@ How recording works:
     When you press SPACE to start, the collector waits for at least one hand
     to appear, then captures exactly 30 frames of landmarks per sequence.
     Each sequence = one row in the CSV (label + 3780 features).
+    Brief tracking dropouts (<= MAX_DROPOUT_FRAMES) no longer reset the
+    sequence — the last good frame is reused instead.
 
 Tips for good data:
     - Perform each phrase naturally and at normal speed
     - Vary your distance from camera and slight angle each rep
     - Aim for 80-120 sequences per phrase (the bar shows your progress)
     - For two-handed signs, make sure BOTH hands are clearly in frame
+    - For "I love you", keep your hand facing the camera with fingers
+      spread clearly — extreme side angles make the thumb/pinky harder
+      to detect
 """
 
 import os
@@ -60,6 +86,18 @@ CAMERA_INDEX = 0
 
 SEQUENCE_LENGTH = 30    # frames per sequence (must match fsl_worker.py)
 SAMPLES_GOAL    = 100   # target sequences per phrase
+
+# Detection confidence (lowered slightly to help with fast/angled signs
+# such as "I love you", which can momentarily look ambiguous to the model)
+MIN_HAND_DETECTION_CONFIDENCE = 0.4
+MIN_HAND_PRESENCE_CONFIDENCE  = 0.4
+MIN_TRACKING_CONFIDENCE       = 0.4
+
+# How many consecutive "no hand detected" frames to tolerate during a
+# recording before we give up and clear the buffer. Reusing the last good
+# frame for short dropouts keeps fast signs like "I love you" from
+# constantly restarting.
+MAX_DROPOUT_FRAMES = 5
 
 # ── Two-hand feature layout ────────────────────────────────────────────────
 # Each frame: hand_0 (21×3=63 values) + hand_1 (21×3=63 values) = 126 values
@@ -171,7 +209,8 @@ def put_text(frame, text, pos, scale=0.75, color=C_WHITE, thickness=2):
 # HUD
 # ─────────────────────────────
 def draw_hud(frame, phrase_idx, capturing, counts, hands_detected,
-             frames_captured, last_saved_time, recording_ready):
+             frames_captured, last_saved_time, recording_ready,
+             dropout_count):
     h, w = frame.shape[:2]
     phrase    = PHRASES[phrase_idx]
     count     = counts.get(phrase, 0)
@@ -183,8 +222,12 @@ def draw_hud(frame, phrase_idx, capturing, counts, hands_detected,
 
     if capturing:
         if recording_ready:
-            status_color = C_GREEN
-            status_text  = f"REC  [{frames_captured}/{SEQUENCE_LENGTH}]"
+            if dropout_count > 0:
+                status_color = C_ORANGE
+                status_text  = f"REC  [{frames_captured}/{SEQUENCE_LENGTH}]  (hold steady, {dropout_count}/{MAX_DROPOUT_FRAMES} drop)"
+            else:
+                status_color = C_GREEN
+                status_text  = f"REC  [{frames_captured}/{SEQUENCE_LENGTH}]"
         else:
             status_color = C_ORANGE
             status_text  = "Waiting for hand..."
@@ -339,6 +382,9 @@ def main():
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
         running_mode=VisionRunningMode.IMAGE,
         num_hands=2,           # ← TWO-HAND DETECTION ENABLED
+        min_hand_detection_confidence=MIN_HAND_DETECTION_CONFIDENCE,
+        min_hand_presence_confidence=MIN_HAND_PRESENCE_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
     )
 
     rows   = load_existing(OUTPUT_FILE)
@@ -352,6 +398,10 @@ def main():
     capturing       = False
     frame_buffer    = deque(maxlen=SEQUENCE_LENGTH)
     last_saved_time = None
+
+    # Dropout-tolerance state
+    last_hand_list  = None   # last known list of raw_landmarks() per hand
+    dropout_count   = 0       # consecutive frames with 0 hands during recording
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -379,25 +429,61 @@ def main():
             # Collect all detected hands (up to 2)
             all_hands     = result.hand_landmarks   # list of 0–2 hand landmark lists
             hands_detected = len(all_hands)
-            recording_ready = capturing and hands_detected >= 1
+
+            # recording_ready means: we are capturing AND either hands are
+            # currently visible, OR we're still within the dropout-tolerance
+            # window (so the sequence can continue using the last good frame).
+            currently_has_hand = hands_detected >= 1
+            within_dropout_window = (
+                capturing
+                and not currently_has_hand
+                and last_hand_list is not None
+                and dropout_count < MAX_DROPOUT_FRAMES
+                and len(frame_buffer) > 0
+            )
+            recording_ready = capturing and (currently_has_hand or within_dropout_window)
 
             # ── Capture frame into buffer ─────────────────────
-            if recording_ready:
-                # Convert each detected hand to raw (x,y,z) tuples
-                hand_list = [raw_landmarks(h_lm) for h_lm in all_hands]
-                # Flatten both hands (zero-pad if only 1 detected)
-                flat_frame = frame_to_flat(hand_list)
-                frame_buffer.append(flat_frame)
+            if capturing:
+                if currently_has_hand:
+                    # Good frame — reset dropout counter, remember it
+                    hand_list = [raw_landmarks(h_lm) for h_lm in all_hands]
+                    last_hand_list = hand_list
+                    dropout_count  = 0
+                elif within_dropout_window:
+                    # Brief dropout — reuse the last known landmarks
+                    hand_list = last_hand_list
+                    dropout_count += 1
+                else:
+                    hand_list = None
 
-                # Once we have a full sequence, save it
-                if len(frame_buffer) == SEQUENCE_LENGTH:
-                    phrase = PHRASES[phrase_idx]
-                    row    = sequence_to_row(phrase, list(frame_buffer))
-                    rows.append(row)
-                    counts[phrase] = counts.get(phrase, 0) + 1
-                    last_saved_time = time.time()
+                if hand_list is not None:
+                    flat_frame = frame_to_flat(hand_list)
+                    frame_buffer.append(flat_frame)
+
+                    # Once we have a full sequence, save it
+                    if len(frame_buffer) == SEQUENCE_LENGTH:
+                        phrase = PHRASES[phrase_idx]
+                        row    = sequence_to_row(phrase, list(frame_buffer))
+                        rows.append(row)
+                        counts[phrase] = counts.get(phrase, 0) + 1
+                        last_saved_time = time.time()
+                        frame_buffer.clear()
+                        last_hand_list = None
+                        dropout_count  = 0
+                        print(f"  [SAVED] '{phrase}'  total: {counts[phrase]}")
+                elif capturing and not currently_has_hand:
+                    # Hand truly gone too long — abandon this sequence and
+                    # wait for a hand to reappear before starting a new one.
+                    if len(frame_buffer) > 0:
+                        print(f"  [DROPPED] Lost hand for too long, restarting sequence for '{PHRASES[phrase_idx]}'")
                     frame_buffer.clear()
-                    print(f"  [SAVED] '{phrase}'  total: {counts[phrase]}")
+                    last_hand_list = None
+                    dropout_count  = 0
+            else:
+                # Not capturing — keep state clean
+                last_hand_list = None
+                dropout_count  = 0
 
             # ── Draw all detected hands ───────────────────────
             for i, hand_lm in enumerate(all_hands):
@@ -406,7 +492,8 @@ def main():
             draw_hud(
                 frame, phrase_idx, capturing, counts,
                 hands_detected, len(frame_buffer),
-                last_saved_time, recording_ready
+                last_saved_time, recording_ready,
+                dropout_count
             )
 
             cv2.imshow("FSL Phrase Collector  |  Q = quit", frame)
@@ -421,17 +508,23 @@ def main():
                 phrase_idx  = (phrase_idx - 1) % len(PHRASES)
                 capturing   = False
                 frame_buffer.clear()
+                last_hand_list = None
+                dropout_count  = 0
                 print(f"[SELECT] {PHRASES[phrase_idx]}  ({counts.get(PHRASES[phrase_idx], 0)} seqs)")
 
             elif key == 83:                      # RIGHT arrow only (removed 'd' fallback)
                 phrase_idx  = (phrase_idx + 1) % len(PHRASES)
                 capturing   = False
                 frame_buffer.clear()
+                last_hand_list = None
+                dropout_count  = 0
                 print(f"[SELECT] {PHRASES[phrase_idx]}  ({counts.get(PHRASES[phrase_idx], 0)} seqs)")
 
             elif key == ord(' '):
                 capturing = not capturing
                 frame_buffer.clear()
+                last_hand_list = None
+                dropout_count  = 0
                 state = "RECORDING" if capturing else "PAUSED"
                 print(f"[{state}] {PHRASES[phrase_idx]}")
 
@@ -461,12 +554,16 @@ def main():
                 phrase_idx = key - ord('1')
                 capturing  = False
                 frame_buffer.clear()
+                last_hand_list = None
+                dropout_count  = 0
                 print(f"[SELECT] {PHRASES[phrase_idx]}")
 
             elif key == ord('0'):
                 phrase_idx = 9
                 capturing  = False
                 frame_buffer.clear()
+                last_hand_list = None
+                dropout_count  = 0
                 print(f"[SELECT] {PHRASES[phrase_idx]}")
 
     cap.release()
