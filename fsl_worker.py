@@ -10,6 +10,11 @@ TWO-HAND PHRASE SUPPORT
 Phrase detection uses the two-hand dataset format:
     30 frames × 2 hands × 21 landmarks × 3 coords = 3780 features
 Missing hands are zero-padded to keep feature size constant.
+
+HOT-RELOAD
+──────────
+Call  reload_phrase_model()  at runtime to swap in a freshly trained
+fsl_phrase_model.joblib without restarting Flask.
 """
 
 import os
@@ -30,8 +35,10 @@ warnings.filterwarnings("ignore", message="X does not have valid feature names")
 # Paths & constants
 # ─────────────────────────────
 MODEL_PATH             = "hand_landmarker.task"
-MODEL_URL              = ("https://storage.googleapis.com/mediapipe-models/"
-                          "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task")
+MODEL_URL              = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
 ALPHABET_MODEL_PATH    = "fsl_model.joblib"
 MOTION_MODEL_PATH      = "fsl_motion_model.joblib"
 NUMBER_MODEL_PATH      = "fsl_number_model.joblib"
@@ -45,15 +52,15 @@ MOTION_CONFIDENCE_THRESHOLD = 0.75
 MOTION_MOVEMENT_THRESHOLD   = 0.15
 NUMBER_CONFIDENCE_THRESHOLD = 0.60
 PHRASE_CONFIDENCE_THRESHOLD = 0.70
-PHRASE_MOVEMENT_THRESHOLD   = 0.05   # lowered — two-hand features scale differently
+PHRASE_MOVEMENT_THRESHOLD   = 0.05
 MOTION_HOLD_SECONDS         = 2.0
 MENU_HOLD_SECONDS           = 1.2
 
-# ── Two-hand phrase feature layout (must match collect_phrases.py) ──────────
-NUM_HANDS_PHRASE = 2
-PER_HAND_PHRASE  = 21 * 3           # 63 floats per hand
-PER_FRAME_PHRASE = NUM_HANDS_PHRASE * PER_HAND_PHRASE   # 126 floats per frame
-NUM_PHRASE_FEATURES = SEQUENCE_LENGTH * PER_FRAME_PHRASE  # 3780
+# ── Two-hand phrase feature layout ──────────────────────────────────────────
+NUM_HANDS_PHRASE    = 2
+PER_HAND_PHRASE     = 21 * 3           # 63 floats per hand
+PER_FRAME_PHRASE    = NUM_HANDS_PHRASE * PER_HAND_PHRASE   # 126 floats per frame
+NUM_PHRASE_FEATURES = SEQUENCE_LENGTH * PER_FRAME_PHRASE   # 3780
 
 MODE_MENU     = "MENU"
 MODE_ALPHABET = "ALPHABET"
@@ -66,7 +73,7 @@ HAND_CONNECTIONS = [
     (5,9),(9,10),(10,11),(11,12),
     (9,13),(13,14),(14,15),(15,16),
     (13,17),(17,18),(18,19),(19,20),
-    (0,17)
+    (0,17),
 ]
 
 # ─────────────────────────────
@@ -79,7 +86,14 @@ _detection_callback = None
 _current_mode       = MODE_MENU
 _mode_lock          = threading.Lock()
 
+# Hot-reload support
+_clf_phrase      = None
+_phrase_mdl_lock = threading.Lock()
 
+
+# ─────────────────────────────
+# Public API
+# ─────────────────────────────
 def set_detection_callback(fn):
     global _detection_callback
     _detection_callback = fn
@@ -102,6 +116,46 @@ def get_latest_frame() -> bytes:
         return _latest_frame_jpg
 
 
+def reload_phrase_model() -> dict:
+    """
+    Hot-swap the phrase model at runtime.
+    Called by Flask /reload_phrase_model route after training is complete.
+    Returns a status dict.
+    """
+    global _clf_phrase
+    if not os.path.exists(PHRASE_MODEL_PATH):
+        return {"ok": False, "error": f"{PHRASE_MODEL_PATH} not found"}
+    try:
+        new_model = joblib.load(PHRASE_MODEL_PATH)
+        with _phrase_mdl_lock:
+            _clf_phrase = new_model
+        classes = list(new_model.classes_) if hasattr(new_model, "classes_") else []
+        print(f"[FSL] Phrase model reloaded — classes: {classes}")
+        return {"ok": True, "classes": classes}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_phrase_model_info() -> dict:
+    """Return metadata about the currently loaded phrase model."""
+    with _phrase_mdl_lock:
+        clf = _clf_phrase
+    if clf is None:
+        return {"loaded": False}
+    classes = list(clf.classes_) if hasattr(clf, "classes_") else []
+    return {
+        "loaded": True,
+        "classes": classes,
+        "n_classes": len(classes),
+        "model_path": os.path.abspath(PHRASE_MODEL_PATH),
+        "model_mtime": os.path.getmtime(PHRASE_MODEL_PATH)
+                       if os.path.exists(PHRASE_MODEL_PATH) else None,
+    }
+
+
+# ─────────────────────────────
+# MJPEG / SSE generators
+# ─────────────────────────────
 def frame_generator():
     """MJPEG generator for Flask streaming route."""
     placeholder = cv2.imencode(".jpg", np.zeros((480, 640, 3), dtype=np.uint8))[1].tobytes()
@@ -131,27 +185,27 @@ def frame_sse_generator():
 
 
 # ─────────────────────────────
-# ML helpers — static (alphabet / numbers)
+# ML helpers — static
 # ─────────────────────────────
 def normalize_landmarks(hand_landmarks):
     wrist = hand_landmarks[0]
-    xs = [lm.x for lm in hand_landmarks]
-    ys = [lm.y for lm in hand_landmarks]
-    scale = max(max(xs)-min(xs), max(ys)-min(ys), 1e-6)
+    xs    = [lm.x for lm in hand_landmarks]
+    ys    = [lm.y for lm in hand_landmarks]
+    scale = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
     features = []
     for lm in hand_landmarks:
         features.extend([
-            (lm.x-wrist.x)/scale,
-            (lm.y-wrist.y)/scale,
-            (lm.z-wrist.z)/scale,
+            (lm.x - wrist.x) / scale,
+            (lm.y - wrist.y) / scale,
+            (lm.z - wrist.z) / scale,
         ])
     return features
 
 
 def predict_static(classifier, hand_landmarks):
     features = np.array(normalize_landmarks(hand_landmarks)).reshape(1, -1)
-    probs = classifier.predict_proba(features)[0]
-    idx   = np.argmax(probs)
+    probs    = classifier.predict_proba(features)[0]
+    idx      = np.argmax(probs)
     return classifier.classes_[idx], probs[idx]
 
 
@@ -159,13 +213,12 @@ def predict_static(classifier, hand_landmarks):
 # ML helpers — two-hand phrases
 # ─────────────────────────────
 def raw_landmarks(hand_landmarks):
-    """Return list of (x, y, z) tuples for one hand."""
     return [(lm.x, lm.y, lm.z) for lm in hand_landmarks]
 
 
 def frame_to_flat(hand_list):
     """
-    Convert up to 2 detected hands into a flat list of 126 floats.
+    Convert up to 2 detected hands into a flat 126-float vector.
     Missing hands are zero-padded — matches collect_phrases.py exactly.
     """
     flat = []
@@ -179,10 +232,7 @@ def frame_to_flat(hand_list):
 
 
 def sequence_to_phrase_features(sequence):
-    """
-    Flatten a list of 30 frame-flat vectors (each 126 floats)
-    into a single 3780-float feature vector for the phrase model.
-    """
+    """Flatten 30 frame-flat vectors (each 126 floats) to 3780 features."""
     flat = []
     for frame_flat in sequence:
         flat.extend(frame_flat)
@@ -192,21 +242,16 @@ def sequence_to_phrase_features(sequence):
 
 
 def calculate_phrase_movement(sequence):
-    """
-    Measure max wrist displacement across the sequence
-    using only the primary (first) hand's wrist (index 0 of first 63 values).
-    """
+    """Max wrist displacement across the sequence (primary hand only)."""
     if len(sequence) < 2:
         return 0.0
-    # Each frame_flat: [hand0_lm0_x, hand0_lm0_y, hand0_lm0_z, hand0_lm1_x, ...]
-    # Wrist of hand0 is indices 0,1,2
     first_wx = sequence[0][0]
     first_wy = sequence[0][1]
     max_dist = 0.0
     for frame_flat in sequence:
-        dx = frame_flat[0] - first_wx
-        dy = frame_flat[1] - first_wy
-        dist = (dx*dx + dy*dy) ** 0.5
+        dx   = frame_flat[0] - first_wx
+        dy   = frame_flat[1] - first_wy
+        dist = (dx * dx + dy * dy) ** 0.5
         if dist > max_dist:
             max_dist = dist
     return max_dist
@@ -214,8 +259,8 @@ def calculate_phrase_movement(sequence):
 
 def predict_phrase(classifier, sequence):
     features = np.array(sequence_to_phrase_features(sequence)).reshape(1, -1)
-    probs = classifier.predict_proba(features)[0]
-    idx   = np.argmax(probs)
+    probs    = classifier.predict_proba(features)[0]
+    idx      = np.argmax(probs)
     return classifier.classes_[idx], probs[idx]
 
 
@@ -249,7 +294,7 @@ def detect_menu_option(lms):
 def draw_hand(frame, hand_landmarks, w, h, color=(255, 0, 0)):
     pts = []
     for lm in hand_landmarks:
-        x, y = int(lm.x*w), int(lm.y*h)
+        x, y = int(lm.x * w), int(lm.y * h)
         pts.append((x, y))
         cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
     for s, e in HAND_CONNECTIONS:
@@ -258,7 +303,7 @@ def draw_hand(frame, hand_landmarks, w, h, color=(255, 0, 0)):
 
 def overlay_text(frame, lines, y_start=30, color=(0, 255, 0)):
     for i, line in enumerate(lines):
-        cv2.putText(frame, line, (20, y_start + i*35),
+        cv2.putText(frame, line, (20, y_start + i * 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
 
@@ -266,24 +311,32 @@ def overlay_text(frame, lines, y_start=30, color=(0, 255, 0)):
 # Main detection loop
 # ─────────────────────────────
 def _detection_loop():
-    global _latest_frame_jpg, _current_mode
+    global _latest_frame_jpg, _current_mode, _clf_phrase
 
     # ── Download MediaPipe model if missing ──
     if not os.path.exists(MODEL_PATH):
-        print("[FSL] Downloading hand landmarker model...")
+        print("[FSL] Downloading hand landmarker model…")
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
 
     # ── Load ML models ──
     clf_alphabet = joblib.load(ALPHABET_MODEL_PATH) if os.path.exists(ALPHABET_MODEL_PATH) else None
     clf_motion   = joblib.load(MOTION_MODEL_PATH)   if os.path.exists(MOTION_MODEL_PATH)   else None
     clf_number   = joblib.load(NUMBER_MODEL_PATH)   if os.path.exists(NUMBER_MODEL_PATH)   else None
-    clf_phrase   = joblib.load(PHRASE_MODEL_PATH)   if os.path.exists(PHRASE_MODEL_PATH)   else None
 
-    print(f"[FSL] Models loaded — alphabet:{clf_alphabet is not None}  "
-          f"motion:{clf_motion is not None}  number:{clf_number is not None}  "
-          f"phrase:{clf_phrase is not None}")
+    with _phrase_mdl_lock:
+        _clf_phrase = joblib.load(PHRASE_MODEL_PATH) if os.path.exists(PHRASE_MODEL_PATH) else None
 
-    # ── MediaPipe setup — num_hands=2 for phrases ──
+    print(
+        f"[FSL] Models loaded — "
+        f"alphabet:{clf_alphabet is not None}  "
+        f"motion:{clf_motion is not None}  "
+        f"number:{clf_number is not None}  "
+        f"phrase:{_clf_phrase is not None}"
+    )
+    if _clf_phrase is not None:
+        print(f"[FSL] Phrase classes: {list(_clf_phrase.classes_)}")
+
+    # ── MediaPipe setup ──
     BaseOptions           = mp.tasks.BaseOptions
     HandLandmarker        = mp.tasks.vision.HandLandmarker
     HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
@@ -292,26 +345,24 @@ def _detection_loop():
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
         running_mode=VisionRunningMode.IMAGE,
-        num_hands=2,   # detect up to 2 hands (needed for phrase signs)
+        num_hands=2,
     )
 
     # ── Per-mode state ──
-    prediction_history  = deque(maxlen=10)
-    phrase_sequence     = deque(maxlen=SEQUENCE_LENGTH)
-    last_detected       = ""
-    menu_hold_start     = None
-    menu_hold_option    = ""
-
-    # Phrase cooldown — prevents the same phrase firing on every overlapping window
-    last_phrase_time    = 0.0
-    PHRASE_COOLDOWN     = 1.5   # seconds between repeated detections of the same phrase
+    prediction_history = deque(maxlen=10)
+    phrase_sequence    = deque(maxlen=SEQUENCE_LENGTH)
+    last_detected      = ""
+    menu_hold_start    = None
+    menu_hold_option   = ""
+    last_phrase_time   = 0.0
+    PHRASE_COOLDOWN    = 1.5
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         print("[FSL] ERROR: Cannot open camera.")
         return
 
-    print("[FSL] Camera opened. Starting detection loop...")
+    print("[FSL] Camera opened. Starting detection loop…")
 
     with HandLandmarker.create_from_options(options) as landmarker:
         while True:
@@ -320,21 +371,21 @@ def _detection_loop():
                 time.sleep(0.05)
                 continue
 
-            h, w  = frame.shape[:2]
-            mode  = get_mode()
-            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame.shape[:2]
+            mode = get_mode()
+            rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result   = landmarker.detect(mp_image)
 
-            all_hand_landmarks = result.hand_landmarks   # list of 0–2 hand landmark lists
+            all_hand_landmarks = result.hand_landmarks
             hand_landmarks     = all_hand_landmarks[0] if all_hand_landmarks else None
 
-            # ── Draw all detected hand skeletons ──
+            # Draw all detected hand skeletons
             hand_colors = [(255, 0, 0), (200, 80, 200)]
             for i, h_lm in enumerate(all_hand_landmarks):
                 draw_hand(frame, h_lm, w, h, hand_colors[i % 2])
 
-            # ── Per-mode logic ──────────────────────────────────────
+            # ── Per-mode logic ───────────────────────────────────────────
 
             if mode == MODE_MENU:
                 if hand_landmarks:
@@ -398,54 +449,66 @@ def _detection_loop():
                     f"conf: {conf:.0%}" if hand_landmarks else "No hand",
                 ])
 
-            elif mode == MODE_PHRASES and clf_phrase:
-                # ── Accumulate two-hand frame into phrase buffer ──
-                if all_hand_landmarks:
-                    hand_list  = [raw_landmarks(h_lm) for h_lm in all_hand_landmarks]
-                    flat_frame = frame_to_flat(hand_list)
-                    phrase_sequence.append(flat_frame)
+            elif mode == MODE_PHRASES:
+                # Read the model under lock so hot-reload is thread-safe
+                with _phrase_mdl_lock:
+                    clf_phrase = _clf_phrase
 
-                # ── Attempt prediction once buffer is full ──
                 phrase_label = last_detected
                 phrase_conf  = 0.0
                 movement     = 0.0
 
-                if len(phrase_sequence) == SEQUENCE_LENGTH:
-                    seq_list = list(phrase_sequence)
-                    movement = calculate_phrase_movement(seq_list)
+                if clf_phrase is None:
+                    overlay_text(frame, [
+                        "PHRASES: No model loaded",
+                        "Run train_phrases.py first",
+                    ], color=(0, 80, 255))
+                else:
+                    # Accumulate two-hand frame into phrase buffer
+                    if all_hand_landmarks:
+                        hand_list  = [raw_landmarks(h_lm) for h_lm in all_hand_landmarks]
+                        flat_frame = frame_to_flat(hand_list)
+                        phrase_sequence.append(flat_frame)
 
-                    if movement >= PHRASE_MOVEMENT_THRESHOLD:
-                        label, conf = predict_phrase(clf_phrase, seq_list)
-                        phrase_conf = conf
-                        now = time.time()
+                    if len(phrase_sequence) == SEQUENCE_LENGTH:
+                        seq_list = list(phrase_sequence)
+                        movement = calculate_phrase_movement(seq_list)
 
-                        if (conf >= PHRASE_CONFIDENCE_THRESHOLD
-                                and (label != last_detected
-                                     or now - last_phrase_time > PHRASE_COOLDOWN)):
-                            last_detected    = label
-                            last_phrase_time = now
-                            phrase_label     = label
-                            if _detection_callback:
-                                _detection_callback({"label": label, "mode": "PHRASES"})
+                        if movement >= PHRASE_MOVEMENT_THRESHOLD:
+                            label, conf = predict_phrase(clf_phrase, seq_list)
+                            phrase_conf = conf
+                            now         = time.time()
 
-                        # Slide window — remove oldest 10 frames so we don't
-                        # wait a full 30 frames before the next prediction
+                            if (conf >= PHRASE_CONFIDENCE_THRESHOLD
+                                    and (label != last_detected
+                                         or now - last_phrase_time > PHRASE_COOLDOWN)):
+                                last_detected    = label
+                                last_phrase_time = now
+                                phrase_label     = label
+                                if _detection_callback:
+                                    _detection_callback({
+                                        "label": label,
+                                        "mode": "PHRASES",
+                                        "confidence": float(conf),
+                                    })
+
+                        # Slide window
                         for _ in range(10):
                             if phrase_sequence:
                                 phrase_sequence.popleft()
 
-                n_hands = len(all_hand_landmarks)
-                overlay_text(frame, [
-                    f"PHRASES: {phrase_label}",
-                    f"conf: {phrase_conf:.0%}  mv: {movement:.3f}",
-                    f"hands: {n_hands}  buf: {len(phrase_sequence)}/{SEQUENCE_LENGTH}",
-                ])
+                    n_hands = len(all_hand_landmarks)
+                    overlay_text(frame, [
+                        f"PHRASES: {phrase_label}",
+                        f"conf: {phrase_conf:.0%}  mv: {movement:.3f}",
+                        f"hands: {n_hands}  buf: {len(phrase_sequence)}/{SEQUENCE_LENGTH}",
+                    ])
 
-            # ── Mode label on frame ──
+            # Mode label
             cv2.putText(frame, f"MODE: {mode}", (w - 200, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-            # ── Encode and publish frame ──
+            # Encode and publish
             _, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             with _frame_lock:
                 _latest_frame_jpg = jpg.tobytes()
